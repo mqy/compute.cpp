@@ -101,6 +101,15 @@ template <typename T> class Worker {
     std::thread thread;
     ICaller *caller;
 
+    inline Task<T> spinning_deque() {
+        while (queue.empty()) {
+            spin_nop(32, !queue.empty());
+            spin_mem_pause(!queue.empty());
+            spin_yield(!queue.empty());
+        }
+        return queue.pop_front();
+    }
+
   public:
     Worker(ICaller *caller, int worker_id) {
         this->caller = caller;
@@ -150,18 +159,10 @@ template <typename T> class Worker {
     static void thread_runner(Worker *w) {
         ASSERT(w->caller);
         thread_local_id = w->worker_id;
-
         w->ack(worker_cmd_start);
 
         while (true) {
-            while (w->queue.empty()) {
-                spin_nop(32, !w->queue.empty());
-                spin_mem_pause(!w->queue.empty());
-                spin_yield(!w->queue.empty());
-            }
-
-            struct Task<T> e = w->queue.pop_front();
-
+            struct Task<T> e = w->spinning_deque();
             switch (e.cmd) {
             case worker_cmd_compute: {
                 e.work.compute();
