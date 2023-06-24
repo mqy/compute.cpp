@@ -10,8 +10,8 @@ OPTIONS += -DSPIN_NOP
 OPTIONS += -DSPIN_YIELD
 
 test-sched: test-sched.cpp
-	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS) $(OPTIONS)
-	time ./test-sched
+	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o ./bin/$@ $(LDFLAGS) $(OPTIONS)
+	time ./bin/test-sched
 
 clean:
 	rm -f *.o ./bin/*
