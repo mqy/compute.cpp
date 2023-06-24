@@ -189,19 +189,29 @@ template <typename T> class Worker {
 
 template <class T> class Scheduler : ICaller {
   private:
-    std::mutex mutex;
-    std::condition_variable cv; // cmd ack
-    std::atomic<int> n_done;
-
     std::vector<Worker<T> *> workers;
     int n_workers;
+    std::atomic<int> n_acks;
+
+#ifdef SCHEDULER_WAIT
+    std::mutex mutex;
+    std::condition_variable cv; // cmd ack
+#else
+    inline void spin_wait_acks() {
+        while (atomic_load(&n_acks) != n_workers) {
+            spin_nop(32, atomic_load(&n_acks) == n_workers);
+            spin_mem_pause(atomic_load(&n_acks) == n_workers);
+            spin_yield(atomic_load(&n_acks) == n_workers);
+        }
+    }
+#endif
 
     inline void send_cmd(enum worker_cmd cmd, T works[] = nullptr,
                          int n_tasks = 0) {
 #ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
 #endif
-        atomic_store(&n_done, 0);
+        atomic_store(&n_acks, 0);
         for (int i = 0; i < n_workers; i++) {
             Worker<T> *w = workers[i];
             Task<T> e = {.cmd = cmd};
@@ -211,20 +221,16 @@ template <class T> class Scheduler : ICaller {
             w->enqueue(e);
         }
 #ifdef SCHEDULER_WAIT
-        cv.wait(lk, [this] { return atomic_load(&n_done) == n_workers; });
+        cv.wait(lk, [this] { return atomic_load(&n_acks) == n_workers; });
         lk.unlock();
 #else
-        while (atomic_load(&n_done) != n_workers) {
-            spin_nop(32, atomic_load(&n_done) == n_workers);
-            spin_mem_pause(atomic_load(&n_done) == n_workers);
-            spin_yield(atomic_load(&n_done) == n_workers);
-        }
+        spin_wait_acks();
 #endif
     }
 
   public:
     Scheduler(int n_workers) {
-        n_done = 0;
+        n_acks = 0;
         this->n_workers = n_workers;
         thread_local_id = CALLER_THREAD_ID;
         for (int i = 0; i < n_workers; i++) {
@@ -245,11 +251,11 @@ template <class T> class Scheduler : ICaller {
         UNUSED(worker_id);
 #ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
-        n_done.fetch_add(1, std::memory_order_relaxed);
+#endif
+        n_acks.fetch_add(1, std::memory_order_relaxed);
+#ifdef SCHEDULER_WAIT
         cv.notify_one();
         lk.unlock();
-#else
-        n_done.fetch_add(1, std::memory_order_relaxed);
 #endif
     }
 
@@ -260,21 +266,15 @@ template <class T> class Scheduler : ICaller {
     void start() {
 #ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
+#endif
         for (int i = 0; i < n_workers; i++) {
             workers[i]->attach_thread();
         }
-        cv.wait(lk, [this] { return atomic_load(&n_done) == n_workers; });
+#ifdef SCHEDULER_WAIT
+        cv.wait(lk, [this] { return atomic_load(&n_acks) == n_workers; });
         lk.unlock();
 #else
-        for (int i = 0; i < n_workers; i++) {
-            workers[i]->attach_thread();
-        }
-
-        while (atomic_load(&n_done) != n_workers) {
-            spin_nop(32, atomic_load(&n_done) == n_workers);
-            spin_mem_pause(atomic_load(&n_done) == n_workers);
-            spin_yield(atomic_load(&n_done) == n_workers);
-        }
+        spin_wait_acks();
 #endif
     }
 
