@@ -4,18 +4,16 @@ LDFLAGS  += -I .
 OPTIONS =
 OPTIONS += -DNDEBUG=
 OPTIONS += -DWORKER_WAIT
-#OPTIONS += -DPRODUCER_WAIT
+#OPTIONS += -DSCHEDULER_WAIT
 OPTIONS += -DSPIN_NOP
 #OPTIONS += -DSPIN_MEM_PAUSE
 OPTIONS += -DSPIN_YIELD
 
-test-ggml-thread: test-ggml-thread.cpp
+test-sched: test-sched.cpp
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS) $(OPTIONS)
+	time ./test-sched
 
 clean:
-	rm -f *.o test-ggml-thread
+	rm -f *.o ./bin/*
 
-test: clean test-ggml-thread
-	time ./test-ggml-thread
-
-all: test-ggml-thread
+.PHONY: clean test-sched

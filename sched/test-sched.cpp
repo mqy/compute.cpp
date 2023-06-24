@@ -1,12 +1,9 @@
 #include <atomic>
 #include <chrono>
 
-#include "ggml-thread.hpp"
+#include "sched.hpp"
 
 // 98% cpu, heavy context switch.
-// real	0m4.372s
-// user	0m3.051s
-// sys	0m1.209s
 void test_spin_yield_forever() {
 #ifdef SPIN_YIELD
     fprintf(stderr, "%s:\n", __func__);
@@ -30,9 +27,6 @@ static void test_spin_yield() {
 }
 
 // 100% cpu
-// real	0m5.357s
-// user	0m5.280s
-// sys	0m0.014s
 void test_spin_nop_forever() {
 #ifdef SPIN_NOP
     const int multiplier = 32;
@@ -47,7 +41,7 @@ void test_spin_nop_forever() {
 
 // watch CPU load for a while
 static void test_spin_nop() {
-#ifdef SPIN_NO
+#ifdef SPIN_NOP
     const int multiplier = 32;
     fprintf(stderr, "%s (multiplier = %d):\n", __func__, multiplier);
     for (int i = 0; i < 1000000; i++) {
@@ -59,9 +53,6 @@ static void test_spin_nop() {
 }
 
 // 100% cpu
-// real	0m5.039s
-// user	0m4.978s
-// sys	0m0.010s
 #ifdef SPIN_MEM_PAUSE
 static void test_mem_pause_forever() {
     fprintf(stderr, "%s:\n", __func__);
@@ -110,12 +101,12 @@ struct DemoWork {
     }
 };
 
-void test_threading() {
+void test_sched() {
     printf("%s()\n", __func__);
 
     atomic_store(&compute_counter, 0);
     constexpr int n_workers = 6;
-    auto m = new ggml::Producer<DemoWork>(n_workers);
+    auto m = new sched::Scheduler<DemoWork>(n_workers);
     struct DemoWork works[n_workers];
 
     m->start();
@@ -174,5 +165,5 @@ int main() {
     test_spin_pause();
     fprintf(stderr, "\n");
 
-    test_threading();
+    test_sched();
 }

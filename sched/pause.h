@@ -10,13 +10,11 @@ extern "C" {
 // build options and utilities.
 //
 
-#define NDEBUG
 // #define WORKER_WAIT
-// #define PRODUCER_WAIT
+// #define SCHEDULER_WAIT
 // #define SPIN_NOP
 // #define SPIN_MEM_PAUSE
 // #define SPIN_YIELD
-#define NDEBUG
 
 #define UNUSED(x) (void)(x)
 #define ASSERT(x)                                                              \
@@ -70,8 +68,8 @@ static inline void mem_pause()
 #endif // SPIN_YIELD
 
 
-static inline bool producer_wait_enable() {
-#ifdef PRODUCER_WAIT
+static inline bool SCHEDULER_WAIT_enable() {
+#ifdef SCHEDULER_WAIT
     return true;
 #else
     return false;
@@ -114,8 +112,8 @@ void print_build_options() {
     fprintf(stderr, "build options:\n");
     fprintf(stderr, "    WORKER_WAIT: %d\n",
         worker_wait_enable());
-    fprintf(stderr, "    PRODUCER_WAIT: %d\n",
-        producer_wait_enable());
+    fprintf(stderr, "    SCHEDULER_WAIT: %d\n",
+        SCHEDULER_WAIT_enable());
     fprintf(stderr, "    SPIN_NOP: %d\n",
         spin_nop_enable());
     fprintf(stderr, "    SPIN_MEM_PAUSE: %d\n",

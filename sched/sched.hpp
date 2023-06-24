@@ -5,12 +5,12 @@
 #include <mutex>
 #include <thread>
 
-#include "ggml-thread.h"
+#include "pause.h"
 
-namespace ggml {
+namespace sched {
 
-#define PRODUCER_ID 1
-// thread_local int32_t thread_local_id;
+#define CALLER_THREAD_ID 1
+thread_local int32_t thread_local_id;
 
 enum worker_cmd {
     worker_cmd_start = 1,
@@ -23,8 +23,8 @@ enum worker_cmd {
 };
 
 // Worker holds this interface.
-class IProducer {
-public:
+class ICaller {
+  public:
     virtual void(receive_ack)(enum worker_cmd cmd, int worker_id) = 0;
 };
 
@@ -33,33 +33,31 @@ template <typename T> struct Task {
     T work; // valid only when cmd == worker_cmd_compute;
 };
 
-// The ring is used as tiny task queue: a drop in replacement of std:vector.
+// a tiny task queue: drop in replacement of std:vector.
 // TODO: try lock-free implementation.
 template <typename T, size_t cap> class Ring {
-  static_assert(std::is_trivial<T>::value, "type T must be trivial");
-  static_assert(cap > 1, "The cap must be bigger than 1");
+    static_assert(std::is_trivial<T>::value, "type T must be trivial");
+    static_assert(cap > 1, "The cap must be bigger than 1");
 
   private:
     std::atomic_flag flag;
-    std::atomic<int> len;            // number of valid slots
-    int head;                        // index to pop from
-    int tail;                        // index to push at
-    T buf[cap]; // buffer
+    std::atomic<int> len; // number of valid slots
+    int head;             // index to pop from
+    int tail;             // index to push at
+    T buf[cap];           // buffer
 
     inline void spin_lock() {
-        while(flag.test_and_set(std::memory_order_acquire)) {
+        while (flag.test_and_set(std::memory_order_acquire)) {
 #ifdef SPIN_NOP
             spin_nop_32_x_(32);
 #endif
         }
     }
 
-    inline void spin_unlock(){
-        flag.clear(std::memory_order_release);
-    }
+    inline void spin_unlock() { flag.clear(std::memory_order_release); }
 
   public:
-    Ring() : len(0), head(0), tail(0) {};
+    Ring() : len(0), head(0), tail(0){};
     inline bool empty() { return len.load(std::memory_order_relaxed) == 0; }
     inline bool full() { return len.load(std::memory_order_relaxed) == cap; }
 
@@ -89,30 +87,27 @@ template <typename T, size_t cap> class Ring {
     }
 };
 
-template <typename T>
-class Worker {
-private:
+template <typename T> class Worker {
+  private:
 #ifdef WORKER_WAIT
     std::mutex mutex;
     std::condition_variable cv; // suspend/resume
     std::atomic<bool> suspending;
 #endif
-    // a SPSC task queue shared with producer, it's enough to set capacity as 2.
+    // a SPSC task queue shared with caller, it's enough to set capacity as 2.
     Ring<Task<T>, 2> queue;
 
     int worker_id;
     std::thread thread;
-    IProducer *producer;
+    ICaller *caller;
 
-public:
-    Worker(IProducer *task_producer, int id) {
-        producer = task_producer;
-        worker_id = id;
+  public:
+    Worker(ICaller *caller, int worker_id) {
+        this->caller = caller;
+        this->worker_id = worker_id;
     }
 
-    void attach_thread() {
-        thread = std::thread(thread_runner, this);
-    }
+    void attach_thread() { thread = std::thread(thread_runner, this); }
 
     ~Worker() {
 #ifdef WORKER_WAIT
@@ -137,7 +132,7 @@ public:
     }
 
     inline void ack(enum worker_cmd cmd) {
-        producer->receive_ack(cmd, worker_id);
+        caller->receive_ack(cmd, worker_id);
     }
 
 #ifdef WORKER_WAIT
@@ -153,8 +148,8 @@ public:
 #endif
 
     static void thread_runner(Worker *w) {
-        ASSERT(w->producer);
-        // thread_local_id = w->worker_id;
+        ASSERT(w->caller);
+        thread_local_id = w->worker_id;
 
         w->ack(worker_cmd_start);
 
@@ -168,33 +163,32 @@ public:
             struct Task<T> e = w->queue.pop_front();
 
             switch (e.cmd) {
-                case worker_cmd_compute: {
-                    e.work.compute();
-                    w->ack(e.cmd); // computed.
-                } break;
-                case worker_cmd_stop: {
-                    w->ack(e.cmd); // exiting
-                } break;
+            case worker_cmd_compute: {
+                e.work.compute();
+                w->ack(e.cmd); // computed.
+            } break;
+            case worker_cmd_stop: {
+                w->ack(e.cmd); // exiting
+            } break;
 #ifdef WORKER_WAIT
-                case worker_cmd_suspend: {
-                    w->ack(e.cmd); // to be suspended
-                    w->wait();
-                } break;
-                case worker_cmd_resume: {
-                    w->ack(e.cmd); // resumed
-                } break;
+            case worker_cmd_suspend: {
+                w->ack(e.cmd); // to be suspended
+                w->wait();
+            } break;
+            case worker_cmd_resume: {
+                w->ack(e.cmd); // resumed
+            } break;
 #endif
-                default: {
-                    ASSERT(false);
-                } break;
+            default: {
+                ASSERT(false);
+            } break;
             }
         }
     }
 };
 
-template <class T>
-class Producer: IProducer {
-private:
+template <class T> class Scheduler : ICaller {
+  private:
     std::mutex mutex;
     std::condition_variable cv; // cmd ack
     std::atomic<int> n_done;
@@ -202,8 +196,9 @@ private:
     std::vector<Worker<T> *> workers;
     int n_workers;
 
-    inline void send_cmd(enum worker_cmd cmd, T works[] = nullptr, int n_tasks = 0) {
-#ifdef PRODUCER_WAIT
+    inline void send_cmd(enum worker_cmd cmd, T works[] = nullptr,
+                         int n_tasks = 0) {
+#ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
 #endif
         atomic_store(&n_done, 0);
@@ -215,12 +210,10 @@ private:
             }
             w->enqueue(e);
         }
-#ifdef PRODUCER_WAIT
-        cv.wait(lk, [this]{return atomic_load(&n_done) == n_workers;});
+#ifdef SCHEDULER_WAIT
+        cv.wait(lk, [this] { return atomic_load(&n_done) == n_workers; });
         lk.unlock();
 #else
-        int pause_counter;
-        UNUSED(pause_counter);
         while (atomic_load(&n_done) != n_workers) {
             spin_nop(32, atomic_load(&n_done) == n_workers);
             spin_mem_pause(atomic_load(&n_done) == n_workers);
@@ -229,18 +222,18 @@ private:
 #endif
     }
 
-public:
-    Producer(int n_workers) {
+  public:
+    Scheduler(int n_workers) {
         n_done = 0;
         this->n_workers = n_workers;
-        // thread_local_id = PRODUCER_ID;
+        thread_local_id = CALLER_THREAD_ID;
         for (int i = 0; i < n_workers; i++) {
-            Worker<T> *w = new Worker<T>(this, PRODUCER_ID + i + 1);
+            Worker<T> *w = new Worker<T>(this, CALLER_THREAD_ID + i + 1);
             workers.push_back(w);
         }
     }
 
-    ~Producer() {
+    ~Scheduler() {
         for (int i = 0; i < workers.size(); i++) {
             delete workers[i];
         }
@@ -250,7 +243,7 @@ public:
     void receive_ack(enum worker_cmd cmd, int worker_id) {
         UNUSED(cmd);
         UNUSED(worker_id);
-#ifdef PRODUCER_WAIT
+#ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
         n_done.fetch_add(1, std::memory_order_relaxed);
         cv.notify_one();
@@ -265,20 +258,18 @@ public:
     }
 
     void start() {
-#ifdef PRODUCER_WAIT
+#ifdef SCHEDULER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
         for (int i = 0; i < n_workers; i++) {
             workers[i]->attach_thread();
         }
-        cv.wait(lk, [this]{return atomic_load(&n_done) == n_workers;});
+        cv.wait(lk, [this] { return atomic_load(&n_done) == n_workers; });
         lk.unlock();
 #else
         for (int i = 0; i < n_workers; i++) {
             workers[i]->attach_thread();
         }
 
-        int pause_counter;
-        UNUSED(pause_counter);
         while (atomic_load(&n_done) != n_workers) {
             spin_nop(32, atomic_load(&n_done) == n_workers);
             spin_mem_pause(atomic_load(&n_done) == n_workers);
@@ -298,4 +289,4 @@ public:
     void stop() { send_cmd(worker_cmd_stop); }
 };
 
-} // namespace: ggml
+} // namespace sched
