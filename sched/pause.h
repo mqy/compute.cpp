@@ -52,12 +52,13 @@ static inline void spin_nop_32_x_(int n) {
 
 #if defined(__x86_64__)
 #include <emmintrin.h>
-static inline void mem_pause() { _mm_pause(); }
+#define mem_pause() _mm_pause()
 #else // !__x86_64__
-static inline void mem_pause()
+#define mem_pause()
 #endif // __x86_64__
 #define spin_mem_pause(break_if) { mem_pause(); if ((break_if)) break; }
 #else // !SPIN_MEM_PAUSE
+#define mem_pause()
 #define spin_mem_pause(break_if)
 #endif // SPIN_MEM_PAUSE
 
@@ -66,7 +67,6 @@ static inline void mem_pause()
 #else
 #define spin_yield(break_if)
 #endif // SPIN_YIELD
-
 
 static inline bool SCHEDULER_WAIT_enable() {
 #ifdef SCHEDULER_WAIT
@@ -118,7 +118,7 @@ void print_build_options() {
         spin_nop_enable());
     fprintf(stderr, "    SPIN_MEM_PAUSE: %d\n",
         spin_mem_pause_enable());
-    fprintf(stderr, "    SPIN_NOP: %d\n",
+    fprintf(stderr, "    SPIN_YIELD: %d\n",
         spin_yield_enable());
 }
 
