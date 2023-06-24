@@ -5,25 +5,17 @@
 
 // 98% cpu, heavy context switch.
 void test_spin_yield_forever() {
-#ifdef SPIN_YIELD
     fprintf(stderr, "%s:\n", __func__);
     while (true) {
         std::this_thread::yield();
     }
-#else
-    fprintf(stderr, "%s: skipped\n", __func__);
-#endif
 }
 
 static void test_spin_yield() {
-#ifdef SPIN_YIELD
     fprintf(stderr, "%s:\n", __func__);
     for (int i = 0; i < 1000000; i++) {
         std::this_thread::yield();
     }
-#else
-    fprintf(stderr, "%s: skipped\n", __func__);
-#endif
 }
 
 // 100% cpu
@@ -53,24 +45,18 @@ static void test_spin_nop() {
 }
 
 // 100% cpu
-#ifdef SPIN_MEM_PAUSE
-static void test_mem_pause_forever() {
+void test_mem_pause_forever() {
     fprintf(stderr, "%s:\n", __func__);
     while (true) {
         mem_pause();
     }
 }
-#endif
 
 static void test_mem_pause() {
-#ifdef SPIN_MEM_PAUSE
     fprintf(stderr, "%s:\n", __func__);
     for (int i = 0; i < 1000000; i++) {
         mem_pause();
     }
-#else
-    fprintf(stderr, "%s: skipped\n", __func__);
-#endif
 }
 
 static void test_spin_pause() {
