@@ -83,7 +83,7 @@ static std::atomic<int> compute_counter;
 struct DemoWork {
     void compute() {
         compute_counter.fetch_add(1, std::memory_order_relaxed);
-        // std::this_thread::sleep_for(std::chrono::microseconds(10));
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
     }
 };
 
@@ -91,49 +91,88 @@ void test_sched() {
     printf("%s()\n", __func__);
 
     atomic_store(&compute_counter, 0);
-    constexpr int n_workers = 6;
+    constexpr int n_workers = 4;
     auto m = new sched::Scheduler<DemoWork>(n_workers);
-    struct DemoWork works[n_workers];
+    struct DemoWork works[n_workers + 1];
 
     m->start();
-
     auto start_time = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < 100; i++) {
-        m->suspend();
-        m->resume();
-    }
-    m->suspend();
+    const int n_loops = 100;
 
-    for (int i = 0; i < 100; i++) {
-        m->resume();
-    }
-    m->suspend();
-
-    int expected = 0;
-    for (int i = 0; i < 100; i++) {
-        if (i % 10 == 0) {
-            m->resume();
-            m->assign(works, n_workers);
+    {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < n_loops; i++) {
             m->suspend();
-            expected += n_workers;
-        } else {
-            m->assign(works, n_workers);
-            expected += n_workers;
+            m->resume();
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto elapsed = 1e-3 * (t1 - t0) / std::chrono::milliseconds(1);
+        fprintf(
+            stderr,
+            "%d workers, suspend + resume for %d times, elapsed: %6.3f ms\n",
+            n_workers, 2 * n_loops, elapsed);
+    }
+
+    m->suspend();
+    // m->suspend(); // trigger assert error
+    m->resume();
+    // m->resume(); // trigger assert error
+
+    {
+        atomic_store(&compute_counter, 0);
+        int compute_expected = 0;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < n_loops; i++) {
+            m->suspend();
+            works[0].compute();
+            works[0].compute();
+            m->resume();
+            m->compute(works + 1, /*suspend*/ false);
+            compute_expected += 2 + n_workers;
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto elapsed = 1e-3 * (t1 - t0) / std::chrono::milliseconds(1);
+        fprintf(
+            stderr,
+            "%d workers, passive suspend before compute, elapsed: %6.3f ms\n",
+            n_workers, elapsed);
+        int actual = atomic_load(&compute_counter);
+        if (actual != compute_expected) {
+            fprintf(stderr, "actual compute: %d, expected: %d, failed\n",
+                    actual, compute_expected);
         }
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto elapse = 1e-3 * (end_time - start_time) / std::chrono::milliseconds(1);
-    int actual = atomic_load(&compute_counter);
-
-    fprintf(stderr, "%d workers, scheduled %d times, elapsed: %.3f ms\n",
-            n_workers, actual, elapse);
-
-    if (actual != expected) {
-        fprintf(stderr, "actual: %d, expected: %d, failed\n", actual, expected);
+    if (worker_compute_suspend_enable()) {
+        atomic_store(&compute_counter, 0);
+        int compute_expected = 0;
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < n_loops; i++) {
+            m->resume();
+            m->compute(works + 1, /*suspend*/ true);
+            works[0].compute();
+            works[0].compute();
+            compute_expected += 2 + n_workers;
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto elapsed = 1e-3 * (t1 - t0) / std::chrono::milliseconds(1);
+        fprintf(
+            stderr,
+            "%d workers, active suspend after compute,   elapsed: %6.3f ms\n",
+            n_workers, elapsed);
+        int actual = atomic_load(&compute_counter);
+        if (actual != compute_expected) {
+            fprintf(stderr, "actual compute: %d, expected: %d, failed\n",
+                    actual, compute_expected);
+        }
     } else {
-        fprintf(stderr, "pass\n");
+        fprintf(stderr, "    active suspend after compute, skip\n");
     }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto elapsed =
+        1e-3 * (end_time - start_time) / std::chrono::milliseconds(1);
+    fprintf(stderr, "%d workers, total time: %.3f ms\n", n_workers, elapsed);
 
     m->stop();
 }

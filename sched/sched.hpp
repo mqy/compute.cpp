@@ -13,13 +13,16 @@ namespace sched {
 thread_local int32_t thread_local_id;
 
 enum worker_cmd {
-    worker_cmd_start = 1,
-    worker_cmd_stop = 2,
+    worker_cmd_start = 1 << 0,
+    worker_cmd_stop = 1 << 1,
+    worker_cmd_compute = 1 << 2,
 #ifdef WORKER_WAIT
-    worker_cmd_suspend = 3,
-    worker_cmd_resume = 4,
+    worker_cmd_suspend = 1 << 3,
+    worker_cmd_resume = 1 << 4,
+#ifdef WORKER_COMPUTE_SUSPEND
+    worker_cmd_compute_suspend = worker_cmd_compute | worker_cmd_suspend,
 #endif
-    worker_cmd_compute = 5,
+#endif
 };
 
 // Worker holds this interface.
@@ -130,13 +133,16 @@ template <typename T> class Worker {
     void enqueue(struct Task<T> e) {
         queue.push_back(e);
 #ifdef WORKER_WAIT
-        if (e.cmd != suspending) {
-            std::unique_lock<std::mutex> lk(mutex);
-            if (atomic_load(&suspending)) {
-                cv.notify_one();
-            }
-            lk.unlock();
+        std::unique_lock<std::mutex> lk(mutex);
+        // ASSERT((e.cmd & worker_cmd_suspend) == 0); // may fail
+        if (atomic_load(&suspending)) {
+            cv.notify_one();
+        } else {
+            // ASSERT(e.cmd != worker_cmd_resume); // may fail
         }
+        lk.unlock();
+#else
+        queue.push_back(e);
 #endif
     }
 
@@ -179,6 +185,13 @@ template <typename T> class Worker {
             case worker_cmd_resume: {
                 w->ack(e.cmd); // resumed
             } break;
+#ifdef WORKER_COMPUTE_SUSPEND
+            case worker_cmd_compute_suspend: {
+                e.work.compute();
+                w->ack(e.cmd); // computed, to be suspended
+                w->wait();
+            } break;
+#endif
 #endif
             default: {
                 ASSERT(false);
@@ -207,26 +220,19 @@ template <class T> class Scheduler : ICaller {
     }
 #endif
 
-    inline void send_cmd(enum worker_cmd cmd, T works[] = nullptr,
-                         int n_tasks = 0) {
-#ifdef SCHEDULER_WAIT
-        std::unique_lock<std::mutex> lk(mutex);
-#endif
+    // dispatch to workers
+    inline void dispatch(enum worker_cmd cmd, T works[] = nullptr) {
+        ASSERT(n_workers > 0);
         atomic_store(&n_acks, 0);
+
         for (int i = 0; i < n_workers; i++) {
             Worker<T> *w = workers[i];
             Task<T> e = {.cmd = cmd};
-            if (n_tasks > 0 && works != nullptr) {
+            if (works != nullptr) {
                 e.work = works[i];
             }
             w->enqueue(e);
         }
-#ifdef SCHEDULER_WAIT
-        cv.wait(lk, [this] { return atomic_load(&n_acks) == n_workers; });
-        lk.unlock();
-#else
-        spin_wait_acks();
-#endif
     }
 
   public:
@@ -260,8 +266,48 @@ template <class T> class Scheduler : ICaller {
 #endif
     }
 
-    void assign(T works[], int n_tasks) {
-        send_cmd(worker_cmd_compute, works, n_tasks);
+    void compute(T works[], bool suspend_after_compute) {
+        if (n_workers == 0) {
+            return;
+        }
+
+        enum worker_cmd cmd = worker_cmd_compute;
+#ifdef WORKER_WAI
+#ifdef WORKER_COMPUTE_SUSPEND
+        if (suspend_after_compute) {
+            cmd = worker_cmd_compute_suspend;
+        }
+#endif
+#endif
+
+#ifdef SCHEDULER_WAIT
+        std::unique_lock<std::mutex> lk(mutex);
+#endif
+        dispatch(cmd, works);
+#ifdef SCHEDULER_WAIT
+        cv.wait(lk, [this] { return atomic_load(&n_acks) == n_workers; });
+        lk.unlock();
+#else
+        spin_wait_acks();
+#endif
+    }
+
+    // suspend, resume, stop
+    void command(enum worker_cmd cmd) {
+        if (n_workers == 0) {
+            return;
+        }
+
+#ifdef SCHEDULER_WAIT
+        std::unique_lock<std::mutex> lk(mutex);
+#endif
+        dispatch(cmd, nullptr);
+#ifdef SCHEDULER_WAIT
+        cv.wait(lk, [this] { return atomic_load(&n_acks) == n_workers; });
+        lk.unlock();
+#else
+        spin_wait_acks();
+#endif
     }
 
     void start() {
@@ -280,14 +326,14 @@ template <class T> class Scheduler : ICaller {
     }
 
 #ifdef WORKER_WAIT
-    void suspend() { send_cmd(worker_cmd_suspend); }
-    void resume() { send_cmd(worker_cmd_resume); }
+    void suspend() { command(worker_cmd_suspend); }
+    void resume() { command(worker_cmd_resume); }
 #else
     void suspend() {}
     void resume() {}
 #endif
 
-    void stop() { send_cmd(worker_cmd_stop); }
+    void stop() { dispatch(worker_cmd_stop); }
 };
 
 } // namespace sched

@@ -11,6 +11,7 @@ extern "C" {
 //
 
 // #define WORKER_WAIT
+// #define WORKER_COMPUTE_SUSPEND
 // #define SCHEDULER_WAIT
 // #define SPIN_NOP
 // #define SPIN_MEM_PAUSE
@@ -84,6 +85,14 @@ static inline bool worker_wait_enable() {
 #endif
 }
 
+static inline bool worker_compute_suspend_enable() {
+#ifdef WORKER_COMPUTE_SUSPEND
+    return true;
+#else
+    return false;
+#endif
+}
+
 static inline bool spin_nop_enable() {
 #ifdef SPIN_NOP
     return true;
@@ -112,6 +121,8 @@ void print_build_options() {
     fprintf(stderr, "build options:\n");
     fprintf(stderr, "    WORKER_WAIT: %d\n",
         worker_wait_enable());
+    fprintf(stderr, "    WORKER_COMPUTE_SUSPEND: %d\n",
+        worker_compute_suspend_enable());
     fprintf(stderr, "    SCHEDULER_WAIT: %d\n",
         SCHEDULER_WAIT_enable());
     fprintf(stderr, "    SPIN_NOP: %d\n",
