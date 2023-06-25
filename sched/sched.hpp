@@ -134,15 +134,13 @@ template <typename T> class Worker {
         queue.push_back(e);
 #ifdef WORKER_WAIT
         std::unique_lock<std::mutex> lk(mutex);
-        // ASSERT((e.cmd & worker_cmd_suspend) == 0); // may fail
         if (atomic_load(&suspending)) {
+            // ASSERT((e.cmd & worker_cmd_suspend) == 0); // may fail
             cv.notify_one();
         } else {
             // ASSERT(e.cmd != worker_cmd_resume); // may fail
         }
         lk.unlock();
-#else
-        queue.push_back(e);
 #endif
     }
 
@@ -169,35 +167,30 @@ template <typename T> class Worker {
 
         while (true) {
             struct Task<T> e = w->spinning_deque();
-            switch (e.cmd) {
-            case worker_cmd_compute: {
+            if (e.cmd == worker_cmd_compute) {
                 e.work.compute();
                 w->ack(e.cmd); // computed.
-            } break;
-            case worker_cmd_stop: {
-                w->ack(e.cmd); // exiting
-            } break;
+            } else if (e.cmd == worker_cmd_stop) {
+                break;
 #ifdef WORKER_WAIT
-            case worker_cmd_suspend: {
+            } else if (e.cmd == worker_cmd_suspend) {
                 w->ack(e.cmd); // to be suspended
                 w->wait();
-            } break;
-            case worker_cmd_resume: {
+            } else if (e.cmd == worker_cmd_resume) {
                 w->ack(e.cmd); // resumed
-            } break;
 #ifdef WORKER_COMPUTE_SUSPEND
-            case worker_cmd_compute_suspend: {
+            } else if (e.cmd == worker_cmd_compute_suspend) {
                 e.work.compute();
                 w->ack(e.cmd); // computed, to be suspended
                 w->wait();
-            } break;
 #endif
 #endif
-            default: {
+            } else {
                 ASSERT(false);
-            } break;
             }
         }
+
+        w->ack(worker_cmd_stop); // exiting
     }
 };
 
@@ -266,13 +259,13 @@ template <class T> class Scheduler : ICaller {
 #endif
     }
 
-    void compute(T works[], bool suspend_after_compute) {
+    void compute(T works[], bool suspend_after_compute = false) {
         if (n_workers == 0) {
             return;
         }
 
         enum worker_cmd cmd = worker_cmd_compute;
-#ifdef WORKER_WAI
+#ifdef WORKER_WAIT
 #ifdef WORKER_COMPUTE_SUSPEND
         if (suspend_after_compute) {
             cmd = worker_cmd_compute_suspend;
@@ -333,7 +326,7 @@ template <class T> class Scheduler : ICaller {
     void resume() {}
 #endif
 
-    void stop() { dispatch(worker_cmd_stop); }
+    void stop() { command(worker_cmd_stop); }
 };
 
 } // namespace sched
