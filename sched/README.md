@@ -7,6 +7,7 @@ which shows working codes, but is hard to merge, lacking of feedbacks, having th
 - hard to test for Windows and CL/CUDA due to limited personal devices.
 - controversial design of task profiles: intrusive.
 - hard to maintain and tends to become trouble maker.
+- in favor of [ggml : get rid of BLAS and all it's variants](https://github.com/ggerganov/ggml/issues/293)
 
 Technical reasons for the new design:
 - Atomicity and threads are hard to make cross-platform correct and performant,
@@ -19,7 +20,7 @@ Technical reasons for the new design:
 The scheduler must:
 
 - be reliable (deadlock-free), performant, configurable, scalable.
-- be well designed on top of interfaces, the reference implementation must be able to replaced.
+- be well designed on top of interfaces, the reference implementation must be able to be easily replaced.
 - be able to support cross-graph computing.
 - be able to support hybrid CPU-GPU computing.
 
