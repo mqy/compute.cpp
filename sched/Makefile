@@ -5,7 +5,9 @@ OPTIONS = -DNDEBUG
 
 test-sched: test-sched.cpp
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o ./bin/$@ $(LDFLAGS) $(OPTIONS)
-	time ./bin/test-sched
+
+run-test-sched: test-sched
+	./bin/test-sched
 
 clean:
 	rm -f *.o ./bin/*

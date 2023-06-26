@@ -15,6 +15,11 @@ namespace sched {
             std::abort();                                                      \
         }                                                                      \
     } while (0)
+#ifndef NDEBUG
+#define DEBUG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define DEBUG(...)
+#endif
 
 // Ref: https://github.com/google/marl/blob/main/src/scheduler.cpp
 inline void nop() {
@@ -35,17 +40,7 @@ static inline void spin_nop_32_x_(int n) {
     }
 }
 
-#define spin_nop(loops, break_if) do {                                         \
-    spin_nop_32_x_((loops));                                                   \
-    if ((break_if)) { break; }                                                 \
-} while(0)
-
-// NOTE: ever tested _mem_pause(), almost similar to spin_nop, so do not use it.
-
-#define spin_yield(break_if) do {                                              \
-    std::this_thread::yield();                                                 \
-    if ((break_if)) { break; }                                                 \
-} while(0)
+#define spin_nop(loops, break_if)  spin_nop_32_x_((loops)); if ((break_if)) { break; }
 
 #define CALLER_THREAD_ID 1
 thread_local int32_t thread_local_id;
@@ -70,80 +65,29 @@ template <typename T> struct Task {
     T work; // valid only when cmd == worker_cmd_compute;
 };
 
-// a tiny task queue: drop in replacement of std:vector.
-// TODO: try lock-free implementation.
-template <typename T, size_t cap> class SpscQueue {
-    static_assert(cap > 1, "The cap must be bigger than 1");
-
-  private:
-    std::atomic_flag flag;
-    std::atomic<int> len; // number of valid slots
-    int head;             // index to pop from
-    int tail;             // index to push at
-    T buf[cap];           // buffer
-
-    inline void spin_lock() {
-        while (flag.test_and_set(std::memory_order_acquire)) {
-#ifdef SPIN_NOP
-            spin_nop_32_x_(32);
-#endif
-        }
-    }
-
-    inline void spin_unlock() { flag.clear(std::memory_order_release); }
-
-  public:
-    SpscQueue() : len(0), head(0), tail(0){};
-    inline bool empty() { return len.load(std::memory_order_relaxed) == 0; }
-    inline bool full() { return len.load(std::memory_order_relaxed) == cap; }
-
-    void push_back(T e) {
-        spin_lock();
-        ASSERT(!full());
-        buf[tail] = e;
-        ++tail;
-        if (tail == cap) {
-            tail = 0;
-        }
-        len.fetch_add(1, std::memory_order_relaxed);
-        spin_unlock();
-    }
-
-    T pop_front() {
-        spin_lock();
-        ASSERT(!empty());
-        T e = buf[head];
-        ++head;
-        if (head == cap) {
-            head = 0;
-        }
-        len.fetch_sub(1, std::memory_order_relaxed);
-        spin_unlock();
-        return e;
-    }
-};
-
+// https://en.cppreference.com/w/cpp/atomic/memory_order
 template <typename T> class Worker {
   private:
     bool enable_suspend;
     std::mutex mutex;
     std::condition_variable cv; // suspend/resume
-    std::atomic<bool> suspending;
+    std::atomic<bool> suspending;;
 
-    // a SPSC task queue shared with caller, it's enough to set capacity as 2.
-    SpscQueue<Task<T>, 2> queue;
+    Task<T> task;
+    // false: reader is expecting for task, true: task set.
+    // reader:
+    // - wait for `task_ready` becomes true
+    // - copy the `task` away
+    // - set `task_ready` as false
+    // writer:
+    // - wait for `task_ready` becomes false
+    // - set `task`
+    // - set `task_ready` as true
+    std::atomic<bool> task_ready;
 
     int worker_id;
     std::thread thread;
     ICaller *caller;
-
-    inline Task<T> spinning_deque() {
-        while (queue.empty()) {
-            spin_nop(32, !queue.empty());
-            spin_yield(!queue.empty());
-        }
-        return queue.pop_front();
-    }
 
   public:
 
@@ -163,14 +107,51 @@ template <typename T> class Worker {
         thread.join();
     }
 
-    void enqueue(struct Task<T> e) {
-        queue.push_back(e);
+    // spin blocking read.
+    struct Task<T> read_task() {
+        DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
+        while(true) {
+            spin_nop_32_x_(256);
+            if (task_ready.load(std::memory_order_acquire)) {
+                 break;
+            }
+            // this yield is critical to performance.
+            std::this_thread::yield();
+            if (task_ready.load(std::memory_order_acquire)) {
+                 break;
+            }
+#ifdef ENABLE_SPIN_PAUSE
+#endif
+        }
+        Task<T> task_copy = task;
+        task_ready.store(false, std::memory_order_release);
+        DEBUG("[%d] %s(): exit\n", thread_local_id, __func__);
+        return task_copy;
+    }
+
+    // spin blocking write.
+    void write_task(struct Task<T> task) {
+        DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
+        while(task_ready.load(std::memory_order_acquire)) {
+            spin_nop_32_x_(256);
+            if (!task_ready.load(std::memory_order_acquire)) {
+                 break;
+            }
+#ifdef ENABLE_SPIN_PAUSE
+            // this yield is critical to performance.
+            std::this_thread::yield();
+#endif
+        }
+        this->task = task;
+        task_ready.store(true, std::memory_order_release);
+
         if (enable_suspend) {
             std::lock_guard<std::mutex> lk(mutex);
-            if (atomic_load(&suspending)) {
+            if (suspending.load(std::memory_order_relaxed)) {
                 cv.notify_one();
             }
         }
+        DEBUG("[%d] %s(): exit\n", thread_local_id, __func__);
     }
 
     inline void ack(enum worker_cmd cmd) {
@@ -178,15 +159,18 @@ template <typename T> class Worker {
     }
 
     inline void wait() {
+        DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
         ASSERT(enable_suspend);
+        constexpr auto timeout = std::chrono::milliseconds(1);
 
         std::unique_lock<std::mutex> lk(mutex);
-        atomic_store(&suspending, true);
-        while (queue.empty()) {
-            cv.wait(lk);
+        suspending.store(true, std::memory_order_relaxed);
+        while (!task_ready.load(std::memory_order_relaxed)) {
+            cv.wait_for(lk, timeout);
         }
-        atomic_store(&suspending, false);
+        suspending.store(false, std::memory_order_relaxed);
         lk.unlock();
+        DEBUG("[%d] %s(): exit\n", thread_local_id, __func__);
     }
 
     static void thread_runner(Worker *w) {
@@ -195,7 +179,7 @@ template <typename T> class Worker {
         w->ack(worker_cmd_start);
 
         while (true) {
-            struct Task<T> e = w->spinning_deque();
+            struct Task<T> e = w->read_task();
 
             if (e.cmd == worker_cmd_compute) {
                 e.work.compute();
@@ -239,23 +223,32 @@ template <class T> class Scheduler : ICaller {
     std::condition_variable cv; // cmd ack
 
     inline void wait_for_acks() {
-        constexpr auto timeout = std::chrono::microseconds(50);
-        while (atomic_load(&n_acks) != n_workers) {
-            spin_nop(32, atomic_load(&n_acks) == n_workers);
-            spin_yield(atomic_load(&n_acks) == n_workers);
+        constexpr auto timeout = std::chrono::milliseconds(1);
+        while(n_acks.load(std::memory_order_relaxed) != n_workers) {
+            spin_nop_32_x_(256);
+            if (n_acks.load(std::memory_order_relaxed) == n_workers) {
+                 break;
+            }
+            
+            std::this_thread::yield();
+            if (n_acks.load(std::memory_order_relaxed) == n_workers) {
+                 break;
+            }
+#ifdef ENABLE_SPIN_PAUSE
+#endif
 
             if (enable_scheduler_suspend) {
                 // quite slow when n_workers > n_physical cores.
                 std::unique_lock<std::mutex> lk(mutex);
                 cv.wait_for(lk, timeout, [this] {
-                    return atomic_load(&n_acks) == n_workers;
+                    return n_acks.load(std::memory_order_relaxed) == n_workers;
                 });
                 lk.unlock();
             }
         }
     }
 
-    // dispatch no wait
+    // dispatch without passive suspending.
     inline void dispatch(enum worker_cmd cmd, T works[] = nullptr) {
         ASSERT(n_workers > 0);
         atomic_store(&n_acks, 0);
@@ -266,7 +259,9 @@ template <class T> class Scheduler : ICaller {
             if (works != nullptr) {
                 e.work = works[i];
             }
-            w->enqueue(e);
+            // blocking write, this should be ok because by design the commands
+            // are processed one by one.
+            w->write_task(e);
         }
     }
 
