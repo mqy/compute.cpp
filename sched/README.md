@@ -21,15 +21,12 @@ The scheduler must:
 
 - be reliable (deadlock-free), performant, configurable, scalable.
 - be well designed on top of interfaces, the reference implementation must be able to be easily replaced.
-- be able to support cross-graph computing.
-- be able to support hybrid CPU-GPU computing.
 
 ## References
 
-- C++ future
+- [C++ conditional variable](https://en.cppreference.com/w/cpp/thread/condition_variable)
+- [spinlock mutexes are extremely dubious in practice](https://www.realworldtech.com/forum/?threadid=189711&curpostid=189723)
 - [C++ marl](https://github.com/google/marl/)
-- [Rust tokio](https://tokio.rs/)
-- [Golang routine](https://github.com/golang/go)
 
 ## Current Status
 
