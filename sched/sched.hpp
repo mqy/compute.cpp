@@ -5,6 +5,9 @@
 #include <mutex>
 #include <thread>
 
+#define ENABLE_WORKER_YIELD
+#define ENABLE_SCHEDULER_YIELD
+
 namespace sched {
 
 #define UNUSED(x) (void)(x)
@@ -74,15 +77,7 @@ template <typename T> class Worker {
     std::atomic<bool> suspending;;
 
     Task<T> task;
-    // false: reader is expecting for task, true: task set.
-    // reader:
-    // - wait for `task_ready` becomes true
-    // - copy the `task` away
-    // - set `task_ready` as false
-    // writer:
-    // - wait for `task_ready` becomes false
-    // - set `task`
-    // - set `task_ready` as true
+    std::atomic_flag task_lock = ATOMIC_FLAG_INIT;
     std::atomic<bool> task_ready;
 
     int worker_id;
@@ -107,47 +102,57 @@ template <typename T> class Worker {
         thread.join();
     }
 
-    // spin blocking read.
-    struct Task<T> read_task() {
+    // blocking read.
+    struct Task<T> take_task() {
         DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
-        while(true) {
-            spin_nop_32_x_(256);
-            if (task_ready.load(std::memory_order_acquire)) {
-                 break;
+        const int n_nop = worker_id;
+        while (true) {
+            if (atomic_load(&task_ready)) {
+                break;
             }
+
+            spin_nop_32_x_(n_nop);
+            if (atomic_load(&task_ready)) {
+                break;
+            }
+
+#ifdef ENABLE_WORKER_YIELD
             // this yield is critical to performance.
             std::this_thread::yield();
-            if (task_ready.load(std::memory_order_acquire)) {
-                 break;
-            }
-#ifdef ENABLE_SPIN_PAUSE
 #endif
         }
+
         Task<T> task_copy = task;
-        task_ready.store(false, std::memory_order_release);
+        atomic_store(&task_ready, false);
+
         DEBUG("[%d] %s(): exit\n", thread_local_id, __func__);
         return task_copy;
     }
 
     // spin blocking write.
-    void write_task(struct Task<T> task) {
+    void write_task(struct Task<T> t) {
         DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
-        while(task_ready.load(std::memory_order_acquire)) {
-            spin_nop_32_x_(256);
-            if (!task_ready.load(std::memory_order_acquire)) {
-                 break;
+        while (true) {
+            if (!atomic_load(&task_ready)) {
+                break;
             }
-#ifdef ENABLE_SPIN_PAUSE
-            // this yield is critical to performance.
+
+            spin_nop_32_x_(32);
+            if (!atomic_load(&task_ready)) {
+                break;
+            }
+
+#ifdef ENABLE_SCHEDULER_YIELD
             std::this_thread::yield();
 #endif
         }
-        this->task = task;
-        task_ready.store(true, std::memory_order_release);
 
+        task = t;
+        atomic_store(&task_ready, true);
+        
         if (enable_suspend) {
             std::lock_guard<std::mutex> lk(mutex);
-            if (suspending.load(std::memory_order_relaxed)) {
+             if (atomic_load(&suspending)) {
                 cv.notify_one();
             }
         }
@@ -161,14 +166,13 @@ template <typename T> class Worker {
     inline void wait() {
         DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
         ASSERT(enable_suspend);
-        constexpr auto timeout = std::chrono::milliseconds(1);
 
         std::unique_lock<std::mutex> lk(mutex);
-        suspending.store(true, std::memory_order_relaxed);
-        while (!task_ready.load(std::memory_order_relaxed)) {
-            cv.wait_for(lk, timeout);
+        atomic_store(&suspending, true);
+        while (!atomic_load(&task_ready)) {
+            cv.wait(lk);
         }
-        suspending.store(false, std::memory_order_relaxed);
+        atomic_store(&suspending, false);
         lk.unlock();
         DEBUG("[%d] %s(): exit\n", thread_local_id, __func__);
     }
@@ -179,7 +183,7 @@ template <typename T> class Worker {
         w->ack(worker_cmd_start);
 
         while (true) {
-            struct Task<T> e = w->read_task();
+            struct Task<T> e = w->take_task();
 
             if (e.cmd == worker_cmd_compute) {
                 e.work.compute();
@@ -224,24 +228,26 @@ template <class T> class Scheduler : ICaller {
 
     inline void wait_for_acks() {
         constexpr auto timeout = std::chrono::milliseconds(1);
-        while(n_acks.load(std::memory_order_relaxed) != n_workers) {
-            spin_nop_32_x_(256);
-            if (n_acks.load(std::memory_order_relaxed) == n_workers) {
+        while(true) {
+            if (atomic_load(&n_acks) == n_workers) {
+                 break;
+            }
+            spin_nop_32_x_(32);
+            if (atomic_load(&n_acks) == n_workers) {
                  break;
             }
             
+#ifdef ENABLE_SCHEDULER_YIELD
             std::this_thread::yield();
-            if (n_acks.load(std::memory_order_relaxed) == n_workers) {
+            if (atomic_load(&n_acks) == n_workers) {
                  break;
             }
-#ifdef ENABLE_SPIN_PAUSE
 #endif
-
             if (enable_scheduler_suspend) {
                 // quite slow when n_workers > n_physical cores.
                 std::unique_lock<std::mutex> lk(mutex);
                 cv.wait_for(lk, timeout, [this] {
-                    return n_acks.load(std::memory_order_relaxed) == n_workers;
+                    return atomic_load(&n_acks) == n_workers;
                 });
                 lk.unlock();
             }

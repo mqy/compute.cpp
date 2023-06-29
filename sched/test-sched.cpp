@@ -3,6 +3,10 @@
 
 #include "sched.hpp"
 
+static inline void sleep_for_ms(int d) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(d));
+}
+
 // 98% cpu, heavy context switch.
 void test_yield_forever() {
     fprintf(stderr, "%s:\n", __func__);
@@ -139,7 +143,7 @@ void test_sched_suspend_resume(int n_workers, int loops) {
 static void test_sched(int n_workers, int loops, bool scheduler_suspend,
                        bool worker_suspend, bool worker_compute_suspend,
                        int workload) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    sleep_for_ms(10);
 
     auto scheduler = new sched::Scheduler<demo::Job>(
         n_workers, scheduler_suspend, worker_suspend);
@@ -201,14 +205,16 @@ int main() {
         m->stop_workers();
     }
 
-    int loops = 100;
+    int loops = 200;
 
     // 2^n
     int n_workers_arr[] = {1, 2, 4, 8, 16};
+    // int n_workers_arr[] = {8};
     int n_workers_arr_len = sizeof(n_workers_arr) / sizeof(n_workers_arr[0]);
 
     // 2^n
-    int work_load_arr[] = {0, 18, 19, 20};
+    int work_load_arr[] = {0, 19, 20, 21};
+    // int work_load_arr[] = {21};
     int work_load_arr_len = sizeof(work_load_arr) / sizeof(work_load_arr[0]);
 
     for (int i = 0; i < n_workers_arr_len; i++) {
@@ -217,15 +223,21 @@ int main() {
 
         for (int j = 0; j < work_load_arr_len; j++) {
             int work_load = work_load_arr[j];
-            test_sched_suspend_resume(n_workers, loops);
+            if (true) {
+                test_sched_suspend_resume(n_workers, loops);
+            }
 
-            test_sched(n_workers, loops, false, false, false, work_load);
-            test_sched(n_workers, loops, false, true, true, work_load);
-            test_sched(n_workers, loops, false, true, false, work_load);
+            if (true) {
+                test_sched(n_workers, loops, false, false, false, work_load);
+                test_sched(n_workers, loops, false, true, true, work_load);
+                test_sched(n_workers, loops, false, true, false, work_load);
+            }
 
-            test_sched(n_workers, loops, true, false, false, work_load);
-            test_sched(n_workers, loops, true, true, true, work_load);
-            test_sched(n_workers, loops, true, true, false, work_load);
+            if (true) {
+                test_sched(n_workers, loops, true, false, false, work_load);
+                test_sched(n_workers, loops, true, true, true, work_load);
+                test_sched(n_workers, loops, true, true, false, work_load);
+            }
         }
     }
 }
