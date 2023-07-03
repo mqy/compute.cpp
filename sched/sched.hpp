@@ -132,11 +132,7 @@ template <typename T> class Worker {
     // spin blocking write.
     void write_task(struct Task<T> t) {
         DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
-        while (true) {
-            if (!atomic_load(&task_ready)) {
-                break;
-            }
-
+        while (atomic_load(&task_ready)) {
             spin_nop_32_x_(32);
             if (!atomic_load(&task_ready)) {
                 break;
@@ -152,7 +148,7 @@ template <typename T> class Worker {
         
         if (enable_suspend) {
             std::lock_guard<std::mutex> lk(mutex);
-             if (atomic_load(&suspending)) {
+            if (atomic_load(&suspending)) {
                 cv.notify_one();
             }
         }
@@ -228,10 +224,7 @@ template <class T> class Scheduler : ICaller {
 
     inline void wait_for_acks() {
         constexpr auto timeout = std::chrono::milliseconds(1);
-        while(true) {
-            if (atomic_load(&n_acks) == n_workers) {
-                 break;
-            }
+        while(atomic_load(&n_acks) != n_workers) {
             spin_nop_32_x_(32);
             if (atomic_load(&n_acks) == n_workers) {
                  break;
