@@ -6,20 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// #define PAUSE 1
-
-static inline void spin_pause(void) {
-#ifdef PAUSE
-#if defined(__SSE2__)
-    _mm_pause();
-#elif defined(__i386__) || defined(__x86_64__)
-    __asm__ __volatile__("pause");
-#elif defined(__aarch64__)
-    __asm__ __volatile__("wfe");
-#endif
-#endif
-}
-
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
@@ -55,8 +41,6 @@ void *thread_runner(void *arg) {
                 return 0;
             }
         }
-
-        spin_pause();
     }
 
     return 0;
@@ -64,8 +48,8 @@ void *thread_runner(void *arg) {
 
 // gcc -O3 -std=c11 test_wait.c -o test_wait && ./test_wait
 int main() {
-    const int n_threads = 3;
-    const int n_loops = 100;
+    const int n_threads = 6; // 3
+    const int n_loops = 1;   // 10
 
     pthread_t pids[n_threads];
     int ids[n_threads];
@@ -86,7 +70,6 @@ int main() {
         {
             n_wait = n_threads;
             while (n_waiting != n_wait) {
-                spin_pause();
             }
         }
 
@@ -101,20 +84,13 @@ int main() {
             pthread_mutex_unlock(&mutex);
 
             while (n_waiting != n_wait) {
-                spin_pause();
             }
         }
 
         total_1 += (time_ns() - t1);
     }
 
-    bool pause = false;
-#ifdef PAUSE
-    pause = true;
-#endif
-
-    printf("n_threads: %d, n_loops: %d, pause: %d\n", n_threads, n_loops,
-           pause);
+    printf("n_threads: %d, n_loops: %d\n", n_threads, n_loops);
     printf("    avg_wait:   %6.3f us\n", 1.0 * total_0 / (1000 * n_loops));
     printf("    avg_wakeup: %6.3f us\n", 1.0 * total_1 / (1000 * n_loops));
 
@@ -123,20 +99,5 @@ int main() {
         pthread_join(pids[i], NULL);
     }
 
-    // n_threads: 3, n_loops: 1000, pause: 0
-    //     avg_wait:    8.695 us
-    //     avg_wakeup:  8.050 us
-
-    // n_threads: 3, n_loops: 1000, pause: 0
-    //     avg_wait:    7.952 us
-    //     avg_wakeup: 11.152 us
-
-    // n_threads: 3, n_loops: 1000, pause: 1
-    //     avg_wait:    8.789 us
-    //     avg_wakeup:  8.929 us
-
-    // n_threads: 3, n_loops: 1000, pause: 1
-    //     avg_wait:    7.869 us
-    //     avg_wakeup: 13.840 us
     return 0;
 }
