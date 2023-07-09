@@ -6,6 +6,8 @@
 #include <cblas.h>
 #elif defined(USE_BLIS)
 #include <blis.h>
+#elif defined(USE_MKL)
+#include <mkl.h>
 #elif defined(USE_ACCELERATE) || defined(__APPLE__)
 #include <Accelerate/Accelerate.h>
 #else
@@ -111,14 +113,17 @@ void *multi_threads_N_chunks_runner(void *arg) {
 
 // split N as trunks.
 // B: trans
-void bench_multi_threads_N_chunks(void) {
+void bench_multi_threads_N_chunks(int n_threads) {
     // Radeon Pro 560X 4 GB
     // K(8192) * N(8192) * M(64) = 4GB, suddenly go slow when M > 64.
 
     const int max_N = 4096;
     const int K = 4096;
 
-    const int n_threads = 4;
+#if defined(USE_MKL)
+    mkl_set_num_threads_local(n_threads == 1 ? 6 : 1);
+    // mkl_set_threading_layer(MKL_THREADING_SEQUENTIAL);
+#endif
 
     pthread_t pids[n_threads];
     struct thread_data_T args[n_threads];
@@ -144,13 +149,15 @@ void bench_multi_threads_N_chunks(void) {
         }
     }
 
-    while (atomic_load(&n_ready) != n_workers) {
+    if (n_workers > 0) {
+        while (atomic_load(&n_ready) != n_workers) {
+        }
+
+        printf("main saw %d workers ready to run\n", n_workers);
     }
 
-    printf("main saw %d workers ready to run\n", n_workers);
-
     // for (int j = 5; j < 12; j++) {
-    for (int j = 0; j < 12; j++) {
+    for (int j = 0; j < 14; j++) {
         int M = 1 << j;
 
         int64_t original_time_us = 0;
@@ -167,12 +174,21 @@ void bench_multi_threads_N_chunks(void) {
 
             int64_t t1 = time_us();
             original_time_us = (time_us() - t0);
+
+             if (n_workers == 0) {
+                printf("M: %4d, N: %5d, K=%5d, n_threads: %2d, duration: %7.3f "
+                       "ms\n",
+                       M, K, max_N, n_threads, 1e-3 * original_time_us);
+
+                continue;
+            }
         }
 
         const int min_chunk_size = 32;
         const int per_thread_max_N = (max_N + n_threads - 1) / n_threads;
 
-        printf("\nM: %d, K: %d, max_N=%d, n_threads: %d, per_thread_max_N: %dn",
+        printf("\nM: %3d, K: %d, max_N=%d, n_threads: %2d, per_thread_max_N: "
+               "%2d\n",
                M, K, max_N, n_threads, per_thread_max_N);
 
         for (int i = 0;; ++i) {
@@ -181,7 +197,7 @@ void bench_multi_threads_N_chunks(void) {
                 break;
             }
 
-            printf("==== M: %d, K: %d, N=%d ===\n", M, K, N);
+            printf("==== M: %4d, K: %5d, N=%5d ===\n", M, K, N);
 
             for (int i = 0; i < n_threads; i++) {
                 atomic_store(&args[i].M, M);
@@ -216,10 +232,11 @@ void bench_multi_threads_N_chunks(void) {
 
             double ratio = 1.0 * equivalent_time_us / original_time_us;
 
-            printf("== M: %d, K: %d, max_N=%d: %6.3f ms, chunk_N=%d: slowest "
-                   "%6.3f ms. Equivalent: %6.3f ms, new/old: %4.2f%% ==\n\n",
-                   M, K, max_N, 1e-3 * original_time_us, N, 1e-3 * slowest_time,
-                   1e-3 * equivalent_time_us, 100.0 * ratio);
+            printf(
+                "== M: %4d, K: %5d, max_N=%5d: %6.3f ms, chunk_N=%2d: slowest "
+                "%6.3f ms. Equivalent: %6.3f ms, new/old: %4.2f%% ==\n\n",
+                M, K, max_N, 1e-3 * original_time_us, N, 1e-3 * slowest_time,
+                1e-3 * equivalent_time_us, 100.0 * ratio);
 
             atomic_store(&n_done, 0);
         }
@@ -233,17 +250,57 @@ void bench_multi_threads_N_chunks(void) {
 }
 
 int main() {
-
     // Conclusions:
+    // - Intel MKL is the fastest at 1-th (when M=8192, 65% of ACCELERATE).
+    //   It's threading is very powerful.
     // - ACCELERATE is the fastest. Multi-threading almost does no help.
     // - OpenBLAS slightly slower. Simillar to ACCELERATE, looks like it also
     //   serializes concurrent runs.
     // - BLIS is the slowest one, but looks like it parallels concurrent runs.
     //   Multi-threading (4 of 6 physical cores) speedup significantly, but does
     //   not compete others: far too slow at 1 thread.
-    bench_multi_threads_N_chunks();
 
-    // TODO: evaluate BLIS multi-threading,
+    /* ACCELERATE 1-th
+    M:    1, N:  4096, K= 4096, n_threads:  1, duration:  14.561 ms
+    M:    2, N:  4096, K= 4096, n_threads:  1, duration:  16.591 ms
+    M:    4, N:  4096, K= 4096, n_threads:  1, duration:  18.280 ms
+    M:    8, N:  4096, K= 4096, n_threads:  1, duration:  19.692 ms
+    M:   16, N:  4096, K= 4096, n_threads:  1, duration:  22.236 ms
+    M:   32, N:  4096, K= 4096, n_threads:  1, duration:  20.030 ms
+    M:   64, N:  4096, K= 4096, n_threads:  1, duration:  22.479 ms
+    M:  128, N:  4096, K= 4096, n_threads:  1, duration:  47.820 ms
+    M:  256, N:  4096, K= 4096, n_threads:  1, duration:  48.787 ms
+    M:  512, N:  4096, K= 4096, n_threads:  1, duration:  80.544 ms
+    M: 1024, N:  4096, K= 4096, n_threads:  1, duration: 134.698 ms
+    M: 2048, N:  4096, K= 4096, n_threads:  1, duration: 223.181 ms
+    M: 4096, N:  4096, K= 4096, n_threads:  1, duration: 452.708 ms
+    M: 8192, N:  4096, K= 4096, n_threads:  1, duration: 847.522 ms
+    */
+
+    /* MKL 1-th + mkl_set_num_threads_local(6)
+    M:    1, N:  4096, K= 4096, n_threads:  1, duration:  13.745 ms
+    M:    2, N:  4096, K= 4096, n_threads:  1, duration:  17.746 ms
+    M:    4, N:  4096, K= 4096, n_threads:  1, duration:  19.582 ms
+    M:    8, N:  4096, K= 4096, n_threads:  1, duration:  19.622 ms
+    M:   16, N:  4096, K= 4096, n_threads:  1, duration:  27.885 ms
+    M:   32, N:  4096, K= 4096, n_threads:  1, duration:  25.929 ms
+    M:   64, N:  4096, K= 4096, n_threads:  1, duration:  25.494 ms
+    M:  128, N:  4096, K= 4096, n_threads:  1, duration:  31.359 ms
+    M:  256, N:  4096, K= 4096, n_threads:  1, duration:  43.956 ms
+    M:  512, N:  4096, K= 4096, n_threads:  1, duration:  63.950 ms
+    M: 1024, N:  4096, K= 4096, n_threads:  1, duration:  87.132 ms
+    M: 2048, N:  4096, K= 4096, n_threads:  1, duration: 185.728 ms
+    M: 4096, N:  4096, K= 4096, n_threads:  1, duration: 303.397 ms
+    M: 8192, N:  4096, K= 4096, n_threads:  1, duration: 549.191 ms
+    */
+    bench_multi_threads_N_chunks(1);
+
+    // bench_multi_threads_N_chunks(4);
+
+    // TODO: evaluate BLIS multi-threading:
     // https://github.com/flame/blis/issues/644
+
+    // TODO: evaluate MKL multi-threading:
+    // https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-linux/2023-1/improving-performance-with-threading.html
     return 0;
 }

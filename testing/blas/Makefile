@@ -21,17 +21,30 @@ ifdef BLIS
 	LDFLAGS = -lblis -L/usr/local/lib
 endif
 
-# example: ACCELERATE=1 make ./test_blas
-test-blas:
+ifdef MKL
+# . /opt/intel/oneapi/setvars.sh
+MKL_ROOT=/opt/intel/oneapi/mkl/latest
+CFLAGS += -DUSE_MKL
+CFLAGS += $(shell PKG_CONFIG_PATH=$(MKL_ROOT)/lib/pkgconfig pkg-config --cflags mkl-sdl)
+LDFLAGS = $(shell PKG_CONFIG_PATH=$(MKL_ROOT)/lib/pkgconfig pkg-config --libs mkl-sdl)
+
+build-test:
+	. /opt/intel/oneapi/setvars.sh --force
 	gcc $(CFLAGS) $(LDFLAGS) test_blas.c -o test_blas
+else
+# example: ACCELERATE=1 make
+build-test:
+	gcc $(CFLAGS) $(LDFLAGS) test_blas.c -o test_blas
+endif
 
-run-tests:
+run-test:
 	mkdir -p out
-	# ACCELERATE=1 make
-	# ./test_blas > ./out/accelerate.txt
+# 	ACCELERATE
+#	./test_blas > ./out/accelerate.txt
+# 	OPENBLAS
+#	./test_blas > ./out/openblas.txt
+# 	BLIS
+#	./test_blas > ./out/blis.txt
+# 	MKL
+	. /opt/intel/oneapi/setvars.sh --force && ./test_blas > ./out/mkl.txt
 
-	# OPENBLAS=1 make
-	# ./test_blas > ./out/openblas.txt
-
-	BLIS=1 make
-	./test_blas > ./out/blis.txt
