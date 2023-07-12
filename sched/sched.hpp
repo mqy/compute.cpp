@@ -77,7 +77,6 @@ template <typename T> class Worker {
     std::atomic<bool> suspending;;
 
     Task<T> task;
-    std::atomic_flag task_lock = ATOMIC_FLAG_INIT;
     std::atomic<bool> task_ready;
 
     int worker_id;
@@ -106,11 +105,7 @@ template <typename T> class Worker {
     struct Task<T> take_task() {
         DEBUG("[%d] %s(): enter\n", thread_local_id, __func__);
         const int n_nop = worker_id;
-        while (true) {
-            if (atomic_load(&task_ready)) {
-                break;
-            }
-
+        while (!atomic_load(&task_ready)) {
             spin_nop_32_x_(n_nop);
             if (atomic_load(&task_ready)) {
                 break;
